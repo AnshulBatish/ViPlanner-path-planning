@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 from typing import Callable
 
 import cv2
@@ -35,13 +34,13 @@ class _UpstreamViPlannerBackend:
             )
 
         self._torch = torch
+        self.train_cfg = TrainCfg.from_yaml(config_path)
         self._transforms = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Resize((360, 640)),
+                transforms.Resize(tuple(self.train_cfg.img_input_size)),
             ]
         )
-        self.train_cfg = TrainCfg.from_yaml(config_path)
         if self.train_cfg.rgb:
             raise RuntimeError(
                 "This integration expects a depth+semantic ViPlanner checkpoint, not an RGB-only checkpoint."
