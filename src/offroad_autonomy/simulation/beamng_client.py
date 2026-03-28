@@ -2,7 +2,7 @@
 
 Encapsulates all BeamNG-specific I/O: launching the simulator, loading
 a scenario, capturing camera frames, polling vehicle state, and sending
-control commands.  Nothing outside this module should import ``beamngpy``.
+control commands. Nothing outside this module should import ``beamngpy``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ import time
 import cv2
 import numpy as np
 
-from offroad_autonomy.types import ControlCommand, PipelineConfig, VehicleState
+from offroad_autonomy.types import (
+    CameraIntrinsics,
+    ControlCommand,
+    PipelineConfig,
+    SimulationObservation,
+    VehicleState,
+)
 
 logger = logging.getLogger("offroad_autonomy.simulation")
 
@@ -27,6 +33,9 @@ class BeamNGClient:
         self._bng = None
         self._vehicle = None
         self._camera = None
+        self._camera_intrinsics = self._build_camera_intrinsics(config)
+        self._camera_translation_vehicle = tuple(float(v) for v in config.camera_pos)
+        self._camera_rotation_camera_to_vehicle = np.eye(3, dtype=np.float32)
 
     def connect(self) -> None:
         """Launch BeamNG, load the configured map, spawn the vehicle, and attach a camera."""
@@ -69,7 +78,7 @@ class BeamNGClient:
             update_priority=1.0,
             is_render_colours=True,
             is_render_annotations=False,
-            is_render_depth=False,
+            is_render_depth=cfg.beamng_render_depth,
             is_using_shared_memory=True,
             is_streaming=True,
         )
@@ -78,19 +87,33 @@ class BeamNGClient:
         self._vehicle = vehicle
         logger.info("BeamNG session ready")
 
-    def capture_frame(self) -> np.ndarray | None:
-        """Grab the latest colour frame from the streaming camera."""
+    def capture_observation(self) -> SimulationObservation | None:
+        """Grab the latest colour and depth images from the front camera."""
         if self._camera is None:
             return None
+
         try:
             images = self._camera.stream()
-            colour = images.get("colour")
-            if colour is None:
+            color = self._decode_colour(images.get("colour"))
+            if color is None:
                 return None
-            return cv2.cvtColor(np.array(colour.convert("RGB")), cv2.COLOR_RGB2BGR)
-        except Exception as exc:
-            logger.debug("Frame capture failed: %s", exc)
+
+            depth = self._decode_depth(images.get("depth"))
+            return SimulationObservation(
+                color_bgr=color,
+                depth_m=depth,
+                camera_intrinsics=self._camera_intrinsics,
+                camera_translation_vehicle=self._camera_translation_vehicle,
+                camera_rotation_camera_to_vehicle=self._camera_rotation_camera_to_vehicle,
+            )
+        except Exception as exc:  # pragma: no cover - depends on BeamNG runtime
+            logger.debug("Observation capture failed: %s", exc)
             return None
+
+    def capture_frame(self) -> np.ndarray | None:
+        """Backwards-compatible colour-only frame capture."""
+        observation = self.capture_observation()
+        return observation.color_bgr if observation is not None else None
 
     def get_vehicle_state(self) -> VehicleState:
         """Poll the latest vehicle telemetry."""
@@ -114,7 +137,7 @@ class BeamNGClient:
                 speed_mps=speed,
                 heading_rad=yaw,
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - depends on BeamNG runtime
             logger.debug("State poll failed: %s", exc)
             return VehicleState()
 
@@ -147,6 +170,50 @@ class BeamNGClient:
         self._vehicle = None
         logger.info("BeamNG session closed")
 
+    @staticmethod
+    def _build_camera_intrinsics(config: PipelineConfig) -> CameraIntrinsics:
+        half_fov = math.radians(config.camera_fov) / 2.0
+        fy = config.camera_height / max(2.0 * math.tan(half_fov), 1e-6)
+        fx = fy
+        return CameraIntrinsics(
+            width=config.camera_width,
+            height=config.camera_height,
+            fx=fx,
+            fy=fy,
+            cx=config.camera_width / 2.0,
+            cy=config.camera_height / 2.0,
+        )
+
+    @staticmethod
+    def _decode_colour(colour) -> np.ndarray | None:
+        if colour is None:
+            return None
+        if isinstance(colour, np.ndarray):
+            image = colour
+        else:
+            image = np.array(colour.convert("RGB"))
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        return image
+
+    @staticmethod
+    def _decode_depth(depth) -> np.ndarray | None:
+        if depth is None:
+            return None
+        if isinstance(depth, np.ndarray):
+            image = depth.astype(np.float32)
+        else:
+            image = np.array(depth).astype(np.float32)
+        if image.ndim == 3:
+            image = image[:, :, 0]
+        if image.dtype.kind in {"u", "i"} and float(image.max(initial=0.0)) > 255.0:
+            image = image / 1000.0
+        return image
+
     def _resolve_spawn(self, cfg: PipelineConfig) -> tuple[tuple, tuple]:
         """Look up spawn position/rotation from the config map table."""
         map_cfg = cfg.map_spawns.get(cfg.beamng_map)
@@ -159,7 +226,7 @@ class BeamNGClient:
             logger.info("Spawn #%d: pos=%s", idx, pos)
             return pos, rot
 
-        logger.warning("No spawn data for map '%s' — using origin", cfg.beamng_map)
+        logger.warning("No spawn data for map '%s' - using origin", cfg.beamng_map)
         return (0, 0, 0), (0, 0, 0, 1)
 
     @staticmethod
