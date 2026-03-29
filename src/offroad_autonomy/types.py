@@ -37,6 +37,30 @@ DEFAULT_DASHBOARD_COLORS = {
 }
 
 
+def _empty_path_2d() -> np.ndarray:
+    return np.empty((0, 2), dtype=np.float32)
+
+
+def _empty_path_3d() -> np.ndarray:
+    return np.empty((0, 3), dtype=np.float32)
+
+
+def _identity_rotation() -> np.ndarray:
+    return np.eye(3, dtype=np.float32)
+
+
+@dataclass
+class CameraIntrinsics:
+    """Pinhole camera parameters in processed-image coordinates."""
+
+    width: int
+    height: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+
 @dataclass
 class FramePacket:
     """Raw and preprocessed camera frame with metadata."""
@@ -46,6 +70,21 @@ class FramePacket:
     timestamp: float
     height: int
     width: int
+    depth_m: np.ndarray | None = None
+    camera_intrinsics: CameraIntrinsics | None = None
+    camera_translation_vehicle: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    camera_rotation_camera_to_vehicle: np.ndarray = field(default_factory=_identity_rotation)
+
+
+@dataclass
+class SimulationObservation:
+    """Latest synchronized simulator observation."""
+
+    color_bgr: np.ndarray
+    depth_m: np.ndarray | None = None
+    camera_intrinsics: CameraIntrinsics | None = None
+    camera_translation_vehicle: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    camera_rotation_camera_to_vehicle: np.ndarray = field(default_factory=_identity_rotation)
 
 
 @dataclass
@@ -69,9 +108,18 @@ class StabilizedResult:
 
 @dataclass
 class PathPlan:
-    """Planned centerline path through the traversable region."""
+    """Planner-agnostic local path output."""
 
-    centerline: np.ndarray
+    planner_mode: str = "centerline"
+    trajectory_vehicle: np.ndarray = field(default_factory=_empty_path_3d)
+    trajectory_world: np.ndarray = field(default_factory=_empty_path_3d)
+    overlay_pixels: np.ndarray = field(default_factory=_empty_path_2d)
+    goal_vehicle: tuple[float, float, float] | None = None
+    goal_overlay_pixel: tuple[float, float] | None = None
+    fear_score: float = 0.0
+    valid: bool = True
+    failure_reason: str = ""
+    centerline: np.ndarray = field(default_factory=_empty_path_2d)
     heading_rad: float = 0.0
     curvature: float = 0.0
     road_width_px: float = 0.0
@@ -124,6 +172,7 @@ class PipelineConfig:
     camera_fov: float = 120.0
     camera_pos: list[float] = field(default_factory=lambda: [0, -2.5, 0.8])
     camera_dir: list[float] = field(default_factory=lambda: [0, -1, -0.1])
+    beamng_render_depth: bool = True
     map_spawns: dict = field(default_factory=dict)
 
     model_weights: str = "models/yoloe-26x-seg.pt"
@@ -143,14 +192,27 @@ class PipelineConfig:
     min_mask_area_fraction: float = 0.001
     morphology_kernel_size: int = 5
 
+    planning_mode: str = "centerline"
     centerline_samples: int = 20
     kalman_process_noise: float = 1e-3
     kalman_measurement_noise: float = 1e-1
     fallback_after_n_misses: int = 3
     min_road_pixels: int = 500
+    viplanner_model_dir: str = "models/viplanner"
+    viplanner_max_depth_m: float = 15.0
+    viplanner_input_height: int = 360
+    viplanner_input_width: int = 640
+    auto_goal_min_row_frac: float = 0.1
+    auto_goal_max_row_frac: float = 0.85
+    auto_goal_search_margin_px: int = 24
+    auto_goal_fallback_forward_m: float = 4.0
 
     stanley_gain_k: float = 2.5
     stanley_softening: float = 1.0
+    pure_pursuit_lookahead_min_m: float = 2.5
+    pure_pursuit_lookahead_gain: float = 0.4
+    pure_pursuit_wheelbase_m: float = 2.8
+    pure_pursuit_max_steer_cmd: float = 1.0
     target_speed_mps: float = 5.0
     max_throttle: float = 0.6
     max_brake: float = 0.8

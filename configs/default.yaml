@@ -11,6 +11,7 @@ beamng:
     fov: 120.0
     pos: [0, -2.5, 0.8]
     dir: [0, -1, -0.1]
+    render_depth: true
   maps:
     jungle_rock_island:
       spawns:
@@ -79,11 +80,30 @@ postprocessing:
   morphology_kernel_size: 5
 
 planning:
+  mode: viplanner
   centerline_samples: 20
   kalman_process_noise: 1.0e-3
   kalman_measurement_noise: 1.0e-1
   fallback_after_n_misses: 3
   min_road_pixels: 500
+
+viplanner:
+  model_dir: "models/viplanner"
+  max_depth_m: 15.0
+  input_height: 360
+  input_width: 640
+
+auto_goal:
+  min_row_frac: 0.1
+  max_row_frac: 0.85
+  search_margin_px: 24
+  fallback_forward_m: 4.0
+
+pure_pursuit:
+  lookahead_min_m: 2.5
+  lookahead_gain: 0.4
+  wheelbase_m: 2.8
+  max_steer_cmd: 1.0
 
 control:
   stanley_gain_k: 2.5

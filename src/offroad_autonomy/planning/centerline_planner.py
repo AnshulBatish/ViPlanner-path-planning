@@ -1,13 +1,9 @@
 """Centerline path planning with Kalman-filter fallback.
 
 Extracts a drivable centerline from the binary traversable-road mask and
-smooths it with a linear Kalman filter.  When the mask is degraded or
+smooths it with a linear Kalman filter. When the mask is degraded or
 empty the filter predicts forward using a constant-curvature motion model,
 providing graceful fallback instead of zero output.
-
-The state vector and transition matrix are structured so an Extended
-Kalman Filter (EKF) can replace the linear filter later without changing
-the rest of the module's interface.
 """
 
 from __future__ import annotations
@@ -23,20 +19,7 @@ logger = logging.getLogger("offroad_autonomy.planning")
 
 
 class _KalmanTracker:
-    """Linear Kalman filter over [lateral_offset, heading, curvature].
-
-    State vector
-    ------------
-    x[0]  lateral_offset   pixels from frame centre (positive = road right)
-    x[1]  heading          road angle relative to forward (radians)
-    x[2]  curvature        rate of change of heading (rad/step)
-
-    Transition model (constant curvature)
-    -------------------------------------
-    offset'   = offset + heading
-    heading'  = heading + curvature
-    curvature' = curvature
-    """
+    """Linear Kalman filter over [lateral_offset, heading, curvature]."""
 
     DIM_X = 3
     DIM_Z = 2
@@ -44,16 +27,19 @@ class _KalmanTracker:
     def __init__(self, q: float, r: float) -> None:
         self.x = np.zeros(self.DIM_X)
         self.P = np.eye(self.DIM_X) * 100.0
-
-        self.F = np.array([
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ])
-        self.H = np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ])
+        self.F = np.array(
+            [
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        self.H = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]
+        )
         self.Q = np.eye(self.DIM_X) * q
         self.R = np.eye(self.DIM_Z) * r
 
@@ -64,10 +50,10 @@ class _KalmanTracker:
 
     def update(self, z: np.ndarray) -> np.ndarray:
         y = z - self.H @ self.x
-        S = self.H @ self.P @ self.H.T + self.R
-        K = self.P @ self.H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ y
-        self.P = (np.eye(self.DIM_X) - K @ self.H) @ self.P
+        s = self.H @ self.P @ self.H.T + self.R
+        k = self.P @ self.H.T @ np.linalg.inv(s)
+        self.x = self.x + k @ y
+        self.P = (np.eye(self.DIM_X) - k @ self.H) @ self.P
         return self.x.copy()
 
 
@@ -78,7 +64,6 @@ class CenterlinePlanner:
         self._n_samples = config.centerline_samples
         self._min_road_px = config.min_road_pixels
         self._max_misses = config.fallback_after_n_misses
-
         self._kf = _KalmanTracker(
             q=config.kalman_process_noise,
             r=config.kalman_measurement_noise,
@@ -95,7 +80,6 @@ class CenterlinePlanner:
             return self._fallback(h, w)
 
         centerline, road_width = self._extract_centerline(mask, h, w)
-
         if len(centerline) < 2:
             return self._fallback(h, w)
 
@@ -108,11 +92,14 @@ class CenterlinePlanner:
         self._consecutive_misses = 0
 
         return PathPlan(
+            planner_mode="centerline",
             centerline=centerline,
+            overlay_pixels=centerline,
             heading_rad=float(state[1]),
             curvature=float(state[2]),
             road_width_px=road_width,
             kalman_active=False,
+            valid=True,
         )
 
     def _fallback(self, h: int, w: int) -> PathPlan:
@@ -122,23 +109,29 @@ class CenterlinePlanner:
 
         if self._consecutive_misses > self._max_misses:
             logger.warning(
-                "No valid road mask for %d frames — Kalman coasting",
+                "No valid road mask for %d frames - Kalman coasting",
                 self._consecutive_misses,
             )
 
         cx = w / 2.0 + state[0]
-        fallback_pts = np.array([
-            [cx, h * 0.9],
-            [cx, h * 0.5],
-            [cx, h * 0.1],
-        ])
+        fallback_pts = np.array(
+            [
+                [cx, h * 0.9],
+                [cx, h * 0.5],
+                [cx, h * 0.1],
+            ],
+            dtype=np.float32,
+        )
 
         return PathPlan(
+            planner_mode="centerline",
             centerline=fallback_pts,
+            overlay_pixels=fallback_pts,
             heading_rad=float(state[1]),
             curvature=float(state[2]),
             road_width_px=0.0,
             kalman_active=True,
+            valid=True,
         )
 
     def _extract_centerline(
@@ -147,57 +140,38 @@ class CenterlinePlanner:
         h: int,
         w: int,
     ) -> tuple[np.ndarray, float]:
-        """Scan horizontal rows to find the road midpoint at each height."""
-        row_indices = np.linspace(
-            int(h * 0.1), int(h * 0.95), self._n_samples, dtype=int,
-        )
-
+        row_indices = np.linspace(int(h * 0.1), int(h * 0.95), self._n_samples, dtype=int)
         points: list[tuple[float, float]] = []
         widths: list[float] = []
 
         for y in row_indices:
-            row = mask[y, :]
-            cols = np.where(row)[0]
-
+            cols = np.where(mask[y, :])[0]
             if len(cols) < 2:
                 continue
-
             left = float(cols[0])
             right = float(cols[-1])
-            cx = (left + right) / 2.0
-            points.append((cx, float(y)))
+            points.append(((left + right) / 2.0, float(y)))
             widths.append(right - left)
 
         if not points:
-            return np.empty((0, 2)), 0.0
+            return np.empty((0, 2), dtype=np.float32), 0.0
 
-        centerline = np.array(points)
+        centerline = np.array(points, dtype=np.float32)
         avg_width = float(np.mean(widths)) if widths else 0.0
         return centerline, avg_width
 
     @staticmethod
     def _estimate_heading(centerline: np.ndarray) -> float:
-        """Compute heading from the bottom third of the centerline."""
-        n = len(centerline)
-        if n < 2:
+        if len(centerline) < 2:
             return 0.0
-
-        bottom_third = max(1, n // 3)
         pt_near = centerline[-1]
-        pt_far = centerline[-bottom_third]
-
+        pt_far = centerline[max(0, len(centerline) - max(2, len(centerline) // 3))]
         dx = pt_far[0] - pt_near[0]
         dy = pt_near[1] - pt_far[1]
-
         if dy < 1e-6:
             return 0.0
-
         return float(math.atan2(dx, dy))
 
     def reset(self) -> None:
-        """Clear Kalman state (e.g. on map reload)."""
-        self._kf = _KalmanTracker(
-            q=self._kf.Q[0, 0],
-            r=self._kf.R[0, 0],
-        )
+        self._kf = _KalmanTracker(q=self._kf.Q[0, 0], r=self._kf.R[0, 0])
         self._consecutive_misses = 0
