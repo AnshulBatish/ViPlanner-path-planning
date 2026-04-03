@@ -12,6 +12,8 @@ from offroad_autonomy.types import ControlCommand, PathPlan, PipelineConfig, Veh
 class VehicleController:
     """Use Stanley for centerlines and pure pursuit for ViPlanner trajectories."""
 
+    _REVERSE_RECOVERY_SPEED_MPS = -0.1
+
     def __init__(self, config: PipelineConfig) -> None:
         self._k = config.stanley_gain_k
         self._k_soft = config.stanley_softening
@@ -30,23 +32,25 @@ class VehicleController:
             return self._compute_viplanner(plan, state)
 
         steering = self._stanley_lateral_control(plan, state)
-        throttle, brake = self._longitudinal_control(state)
+        throttle, brake, gear = self._longitudinal_control(state)
         return ControlCommand(
             steering=float(np.clip(steering, -1.0, 1.0)),
             throttle=throttle,
             brake=brake,
+            gear=gear,
         )
 
     def _compute_viplanner(self, plan: PathPlan, state: VehicleState) -> ControlCommand:
         if not plan.valid or len(plan.trajectory_vehicle) < 2:
-            return ControlCommand(steering=0.0, throttle=0.0, brake=self._max_brake)
+            return ControlCommand(steering=0.0, throttle=0.0, brake=self._max_brake, gear=1)
 
         steering = self._pure_pursuit_lateral_control(plan, state)
-        throttle, brake = self._longitudinal_control(state)
+        throttle, brake, gear = self._longitudinal_control(state)
         return ControlCommand(
             steering=float(np.clip(steering, -1.0, 1.0)),
             throttle=throttle,
             brake=brake,
+            gear=gear,
         )
 
     def _stanley_lateral_control(self, plan: PathPlan, state: VehicleState) -> float:
@@ -62,7 +66,8 @@ class VehicleController:
         return heading_err + stanley_term
 
     def _pure_pursuit_lateral_control(self, plan: PathPlan, state: VehicleState) -> float:
-        lookahead = max(self._lookahead_min, self._lookahead_min + self._lookahead_gain * state.speed_mps)
+        speed = max(state.forward_speed_mps, 0.0)
+        lookahead = max(self._lookahead_min, self._lookahead_min + self._lookahead_gain * speed)
         target = self._select_lookahead_point(plan.trajectory_vehicle, lookahead)
         if target is None:
             return 0.0
@@ -87,12 +92,15 @@ class VehicleController:
             return None
         return forward_points[-1]
 
-    def _longitudinal_control(self, state: VehicleState) -> tuple[float, float]:
-        speed_err = self._target_speed - state.speed_mps
+    def _longitudinal_control(self, state: VehicleState) -> tuple[float, float, int]:
+        if state.forward_speed_mps < self._REVERSE_RECOVERY_SPEED_MPS:
+            return 0.0, self._max_brake, 1
+
+        speed_err = self._target_speed - state.forward_speed_mps
         if speed_err > 0:
             throttle = min(self._speed_kp * speed_err, self._max_throttle)
             brake = 0.0
         else:
             throttle = 0.0
             brake = min(self._speed_kp * abs(speed_err), self._max_brake)
-        return throttle, brake
+        return throttle, brake, 1

@@ -34,11 +34,13 @@ def test_control_command_defaults():
     assert cmd.steering == 0.0
     assert cmd.throttle == 0.0
     assert cmd.brake == 0.0
+    assert cmd.gear is None
 
 
 def test_vehicle_state_defaults():
     vs = VehicleState()
     assert vs.speed_mps == 0.0
+    assert vs.forward_speed_mps == 0.0
     assert vs.heading_rad == 0.0
 
 

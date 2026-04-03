@@ -134,6 +134,7 @@ class VehicleState:
     rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
     speed_mps: float = 0.0
+    forward_speed_mps: float = 0.0
     heading_rad: float = 0.0
 
 
@@ -144,6 +145,7 @@ class ControlCommand:
     steering: float = 0.0
     throttle: float = 0.0
     brake: float = 0.0
+    gear: int | None = None
 
 
 @dataclass

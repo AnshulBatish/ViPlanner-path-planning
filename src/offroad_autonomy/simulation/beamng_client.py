@@ -28,14 +28,25 @@ logger = logging.getLogger("offroad_autonomy.simulation")
 class BeamNGClient:
     """Manages the BeamNG.tech session lifecycle and sensor I/O."""
 
+    _BEAMNG_TO_VEHICLE = np.array(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
     def __init__(self, config: PipelineConfig) -> None:
         self._config = config
         self._bng = None
         self._vehicle = None
         self._camera = None
         self._camera_intrinsics = self._build_camera_intrinsics(config)
-        self._camera_translation_vehicle = tuple(float(v) for v in config.camera_pos)
-        self._camera_rotation_camera_to_vehicle = np.eye(3, dtype=np.float32)
+        self._camera_translation_vehicle = tuple(
+            float(v) for v in self._beamng_to_vehicle_coords(config.camera_pos)
+        )
+        self._camera_rotation_camera_to_vehicle = self._build_camera_rotation(config.camera_dir)
 
     def connect(self) -> None:
         """Launch BeamNG, load the configured map, spawn the vehicle, and attach a camera."""
@@ -126,7 +137,9 @@ class BeamNGClient:
             pos = tuple(st.get("pos", (0, 0, 0)))
             rot = tuple(st.get("rotation", (0, 0, 0, 1)))
             vel = tuple(st.get("vel", (0, 0, 0)))
+            direction = np.asarray(st.get("dir", (0, -1, 0)), dtype=np.float32)
             speed = math.sqrt(sum(v ** 2 for v in vel))
+            forward_speed = self._forward_speed(vel, direction)
 
             _, _, yaw = self._quat_to_euler(rot)
 
@@ -135,6 +148,7 @@ class BeamNGClient:
                 rotation=rot,
                 velocity=vel,
                 speed_mps=speed,
+                forward_speed_mps=forward_speed,
                 heading_rad=yaw,
             )
         except Exception as exc:  # pragma: no cover - depends on BeamNG runtime
@@ -149,6 +163,7 @@ class BeamNGClient:
             steering=cmd.steering,
             throttle=cmd.throttle,
             brake=cmd.brake,
+            gear=cmd.gear,
         )
 
     def disconnect(self) -> None:
@@ -199,6 +214,46 @@ class BeamNGClient:
         else:
             image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
         return image
+
+    @classmethod
+    def _beamng_to_vehicle_coords(cls, vector: tuple[float, float, float] | list[float] | np.ndarray) -> np.ndarray:
+        raw = np.asarray(vector, dtype=np.float32)
+        return cls._BEAMNG_TO_VEHICLE @ raw
+
+    @classmethod
+    def _build_camera_rotation(cls, camera_dir: list[float]) -> np.ndarray:
+        forward = cls._beamng_to_vehicle_coords(camera_dir)
+        forward_norm = float(np.linalg.norm(forward))
+        if forward_norm <= 1e-6:
+            return np.eye(3, dtype=np.float32)
+        forward = forward / forward_norm
+
+        up_hint = cls._beamng_to_vehicle_coords((0.0, 0.0, 1.0))
+        left = np.cross(up_hint, forward)
+        left_norm = float(np.linalg.norm(left))
+        if left_norm <= 1e-6:
+            left = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        else:
+            left = left / left_norm
+
+        up = np.cross(forward, left)
+        up_norm = float(np.linalg.norm(up))
+        if up_norm <= 1e-6:
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        else:
+            up = up / up_norm
+
+        return np.stack([forward, left, up], axis=1).astype(np.float32)
+
+    @staticmethod
+    def _forward_speed(velocity: tuple[float, float, float], direction: np.ndarray) -> float:
+        direction_xy = np.asarray(direction[:2], dtype=np.float32)
+        norm = float(np.linalg.norm(direction_xy))
+        if norm <= 1e-6:
+            return 0.0
+        direction_xy = direction_xy / norm
+        velocity_xy = np.asarray(velocity[:2], dtype=np.float32)
+        return float(np.dot(velocity_xy, direction_xy))
 
     @staticmethod
     def _decode_depth(depth) -> np.ndarray | None:
