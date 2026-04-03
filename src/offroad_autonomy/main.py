@@ -1,9 +1,4 @@
-"""Application entry point for the offroad_autonomy pipeline.
-
-Loads configuration, initialises the BeamNG client and the autonomy
-pipeline, then runs the main perception-planning-control loop until
-interrupted.
-"""
+"""Application entry point for the offroad_autonomy pipeline."""
 
 from __future__ import annotations
 
@@ -18,11 +13,7 @@ from offroad_autonomy.pipeline import AutonomyPipeline
 from offroad_autonomy.simulation.beamng_client import BeamNGClient
 from offroad_autonomy.utils.config import load_config
 from offroad_autonomy.utils.logger import setup_logger
-from offroad_autonomy.visualization import (
-    AutonomyDashboard,
-    DashboardTelemetry,
-    DashboardWindow,
-)
+from offroad_autonomy.visualization import AutonomyDashboard, DashboardTelemetry, DashboardWindow
 
 logger = logging.getLogger("offroad_autonomy.main")
 
@@ -40,11 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="offroad_autonomy - autonomous off-road driving in BeamNG",
     )
-    parser.add_argument(
-        "--config",
-        default="configs/default.yaml",
-        help="Path to the YAML configuration file.",
-    )
+    parser.add_argument("--config", default="configs/default.yaml", help="Path to the YAML configuration file.")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -55,9 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _mean_confidence(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    return sum(values) / len(values)
+    return sum(values) / len(values) if values else 0.0
 
 
 def _build_dashboard_telemetry(
@@ -70,6 +55,9 @@ def _build_dashboard_telemetry(
     kalman_active: bool,
     fps: float,
     latency_ms: float,
+    planner_mode: str,
+    fear_score: float,
+    plan_valid: bool,
 ) -> DashboardTelemetry:
     return DashboardTelemetry(
         speed_mps=speed_mps,
@@ -81,6 +69,9 @@ def _build_dashboard_telemetry(
         kalman_active=kalman_active,
         fps=fps,
         latency_ms=latency_ms,
+        planner_mode=planner_mode,
+        fear_score=fear_score,
+        plan_valid=plan_valid,
     )
 
 
@@ -89,8 +80,7 @@ def main() -> None:
     _shutdown = False
     args = build_parser().parse_args()
 
-    level = getattr(logging, args.log_level)
-    setup_logger(level=level)
+    setup_logger(level=getattr(logging, args.log_level))
 
     config_path = Path(args.config)
     if not config_path.exists():
@@ -103,11 +93,7 @@ def main() -> None:
 
     client = BeamNGClient(config)
     pipeline = AutonomyPipeline(config)
-    dashboard = AutonomyDashboard(
-        width=1600,
-        height=900,
-        colors=config.dashboard_colors,
-    )
+    dashboard = AutonomyDashboard(width=1600, height=900, colors=config.dashboard_colors)
     dashboard_window = None
 
     frame_count = 0
@@ -116,22 +102,25 @@ def main() -> None:
 
     try:
         client.connect()
-        dashboard_window = DashboardWindow(
-            _WINDOW_TITLE,
-            dashboard.width,
-            dashboard.height,
-        )
+        dashboard_window = DashboardWindow(_WINDOW_TITLE, dashboard.width, dashboard.height)
         logger.info("Entering main loop - press Ctrl+C to stop")
 
         while not _shutdown:
-            frame = client.capture_frame()
-            if frame is None:
+            observation = client.capture_observation()
+            if observation is None:
                 time.sleep(0.01)
                 continue
 
             state = client.get_vehicle_state()
             t_loop = time.perf_counter()
-            result = pipeline.step_result(frame, state)
+            result = pipeline.step_result(
+                observation.color_bgr,
+                state,
+                depth_frame=observation.depth_m,
+                camera_intrinsics=observation.camera_intrinsics,
+                camera_translation_vehicle=observation.camera_translation_vehicle,
+                camera_rotation_camera_to_vehicle=observation.camera_rotation_camera_to_vehicle,
+            )
             client.send_controls(result.command)
 
             loop_latency_ms = (time.perf_counter() - t_loop) * 1000.0
@@ -148,6 +137,9 @@ def main() -> None:
                 kalman_active=result.plan.kalman_active,
                 fps=fps_ema,
                 latency_ms=loop_latency_ms,
+                planner_mode=result.plan.planner_mode,
+                fear_score=result.plan.fear_score,
+                plan_valid=result.plan.valid,
             )
             dashboard_frame = dashboard.render(
                 result.frame.raw,
